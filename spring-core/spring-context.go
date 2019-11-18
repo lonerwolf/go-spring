@@ -14,10 +14,14 @@
  * limitations under the License.
  */
 
+//
+// 实现了一个完善的 IoC 容器。
+//
 package SpringCore
 
 import (
 	"reflect"
+	"strings"
 )
 
 //
@@ -50,10 +54,40 @@ type BeanDefinition struct {
 	Init  int           // Bean 初始化状态
 	Type  reflect.Type  // Bean 反射得到的类型
 	Value reflect.Value // Bean 反射得到的值
+	cond  *Conditional  // Bean 注册需要满足的条件
 }
 
 //
-// 获取原始类型的全限定名
+// 将 SpringBean 转换为 BeanDefinition 对象
+//
+func ToBeanDefinition(name string, bean SpringBean) *BeanDefinition {
+
+	t := reflect.TypeOf(bean)
+
+	// 检查 Bean 的类型，只能注册指针或者数组类型的 Bean
+	if t.Kind() != reflect.Ptr && t.Kind() != reflect.Slice && t.Kind() != reflect.Map {
+		panic("bean must be pointer or slice or map")
+	}
+
+	v := reflect.ValueOf(bean)
+
+	// 生成默认名称
+	if name == "" {
+		name = t.String()
+	}
+
+	return &BeanDefinition{
+		Init:  Uninitialized,
+		Name:  name,
+		Bean:  bean,
+		Type:  t,
+		Value: v,
+	}
+}
+
+//
+// 获取原始类型的全限定名，golang 允许不同的路径下存在相同的包，故此有全限定名的需求。形如
+// "github.com/go-spring/go-spring/spring-core/SpringCore.DefaultSpringContext"
 //
 func TypeName(t reflect.Type) string {
 
@@ -73,7 +107,7 @@ func TypeName(t reflect.Type) string {
 }
 
 //
-// 测试类型全限定名和 Bean 名称是否都能匹配
+// 测试类型全限定名和 Bean 名称是否都能匹配。
 //
 func (bean *BeanDefinition) Match(typeName string, beanName string) bool {
 
@@ -91,40 +125,35 @@ func (bean *BeanDefinition) Match(typeName string, beanName string) bool {
 }
 
 //
-// 定义 SpringContext 接口
+// 定义 IoC 容器接口，Bean 的注册规则：
+//   1. 单例 Bean 只能注册指针和数组。
+//   2. 执行完 AutoWireBeans 后不能再注册 Bean（性能考虑）。
+//   3. 原型 Bean 只能通过 BeanFactory 的形式使用，参见测试用例。
 //
 type SpringContext interface {
-	// Bean 的注册规则:
-	// 1. 单例 Bean 只能注册指针和数组。
-	// 2. 执行完 AutoWireBeans 后不能再注册 Bean（性能考虑）。
-	// 3. 原型 Bean 只能通过 BeanFactory 的形式使用，参见测试用例。
+	// 属性值列表接口
+	Properties
 
 	// 注册单例 Bean，不指定名称，重复注册会 panic。
-	RegisterBean(bean SpringBean)
+	RegisterBean(bean SpringBean) *Conditional
 
 	// 注册单例 Bean，需指定名称，重复注册会 panic。
-	RegisterNameBean(name string, bean SpringBean)
+	RegisterNameBean(name string, bean SpringBean) *Conditional
 
 	// 注册单例 Bean，使用 BeanDefinition 对象，重复注册会 panic。
-	RegisterBeanDefinition(beanDefinition *BeanDefinition)
+	RegisterBeanDefinition(beanDefinition *BeanDefinition) *Conditional
 
-	// 根据类型获取单例 Bean，多于 1 个会 panic，找不到也会 panic。
+	// 根据类型获取单例 Bean，若多于 1 个则 panic；找到返回 true 否则返回 false。
 	// 什么情况下会多于 1 个？假设 StructA 实现了 InterfaceT，而且用户在注
 	// 册时使用了 StructA 的指针注册多个 Bean，如果在获取时使用 InterfaceT,
 	// 则必然出现多于 1 个的情况。
-	GetBean(i interface{})
+	GetBean(i interface{}) bool
 
-	// 根据类型获取单例 Bean，若多于 1 个则 panic；找到返回 true 否则返回 false。
-	FindBean(i interface{}) bool
-
-	// 根据名称和类型获取单例 Bean，多于 1 个会 panic，找不到也会 panic。
+	// 根据名称和类型获取单例 Bean，若多于 1 个则 panic；找到返回 true 否则返回 false。
 	// 什么情况下会多于 1 个？假设 StructA 和 StructB 都实现了 InterfaceT，
 	// 而且用户在注册时使用了相同的名称分别注册了 StructA 和 StructB 的 Bean，
 	// 这时候如果使用 InterfaceT 去获取，就会出现多于 1 个的情况。
-	GetBeanByName(beanId string, i interface{})
-
-	// 根据名称和类型获取单例 Bean，若多于 1 个则 panic；找到返回 true 否则返回 false。
-	FindBeanByName(beanId string, i interface{}) bool
+	GetBeanByName(beanId string, i interface{}) bool
 
 	// 收集数组或指针定义的所有符合条件的 Bean 对象，收集到返回 true，否则返回 false。
 	// 什么情况下可以使用此功能？假设 HandlerA 和 HandlerB 都实现了 HandlerT 接口，
@@ -132,45 +161,38 @@ type SpringContext interface {
 	// 和 HandlerB 对象，那么他可以通过 []HandlerT 即数组的方式获取到所有 Bean。
 	CollectBeans(i interface{}) bool
 
-	// 收集数组或指针定义的所有符合条件的 Bean 对象，收集不到会 panic。
-	MustCollectBeans(i interface{})
+	// 根据名称和类型获取单例 Bean，若多于 1 个则 panic；找到返回 true 否则返回 false。
+	FindBeanByName(beanId string) (interface{}, bool)
 
 	// 获取所有 Bean 的定义，一般仅供调试使用。
-	GetAllBeansDefinition() []*BeanDefinition
-
-	// 加载属性配置文件
-	LoadProperties(filename string)
-
-	// 获取属性值，属性名称不支持大小写。
-	GetProperty(name string) interface{}
-
-	// 获取布尔型属性值，属性名称不支持大小写。
-	GetBoolProperty(name string) bool
-
-	// 获取有符号整型属性值，属性名称不支持大小写。
-	GetIntProperty(name string) int64
-
-	// 获取无符号整型属性值，属性名称不支持大小写。
-	GetUintProperty(name string) uint64
-
-	// 获取浮点型属性值，属性名称不支持大小写。
-	GetFloatProperty(name string) float64
-
-	// 获取字符串型属性值，属性名称不支持大小写。
-	GetStringProperty(name string) string
-
-	// 获取属性值，如果没有找到则使用指定的默认值，属性名称不支持大小写。
-	GetDefaultProperty(name string, defaultValue interface{}) (interface{}, bool)
-
-	// 设置属性值，属性名称不支持大小写。
-	SetProperty(name string, value interface{})
-
-	// 获取指定前缀的属性值集合，属性名称不支持大小写。
-	GetPrefixProperties(prefix string) map[string]interface{}
+	GetAllBeanDefinitions() []*BeanDefinition
 
 	// 自动绑定所有的 SpringBean
 	AutoWireBeans()
 
 	// 绑定外部指定的 SpringBean
 	WireBean(bean SpringBean) error
+
+	// 注册类型转换器，用于属性绑定，函数原型 func(string)struct
+	RegisterTypeConverter(fn interface{})
+}
+
+//
+// 解析 BeanId 的内容，"TypeName:BeanName?" 或者 "[]?"
+//
+func ParseBeanId(beanId string) (typeName string, beanName string, nullable bool) {
+
+	if ss := strings.Split(beanId, ":"); len(ss) > 1 {
+		typeName = ss[0]
+		beanName = ss[1]
+	} else {
+		beanName = ss[0]
+	}
+
+	if strings.HasSuffix(beanName, "?") {
+		beanName = beanName[:len(beanName)-1]
+		nullable = true
+	}
+
+	return
 }

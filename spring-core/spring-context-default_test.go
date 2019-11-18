@@ -23,9 +23,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-spring/go-spring-parent/spring-utils"
 	"github.com/go-spring/go-spring/spring-core"
 	pkg1 "github.com/go-spring/go-spring/spring-core/testdata/pkg/bar"
 	pkg2 "github.com/go-spring/go-spring/spring-core/testdata/pkg/foo"
+	"github.com/magiconair/properties/assert"
 	"github.com/spf13/cast"
 )
 
@@ -209,6 +211,9 @@ type Object struct {
 
 	// 指定名称时使用精确匹配模式，不对数组元素进行转换，即便能做到似乎也无意义
 	InterfaceSliceByName []fmt.Stringer `autowire:"struct_ptr_slice?"`
+
+	MapTyType map[string]interface{} `autowire:""`
+	MapByName map[string]interface{} `autowire:"map"`
 }
 
 func TestDefaultSpringContext_AutoWireBeans(t *testing.T) {
@@ -247,6 +252,12 @@ func TestDefaultSpringContext_AutoWireBeans(t *testing.T) {
 
 	s := []fmt.Stringer{&Binding{3}}
 	ctx.RegisterBean(s)
+
+	m := map[string]interface{}{
+		"5": 5,
+	}
+
+	ctx.RegisterNameBean("map", m)
 
 	ctx.AutoWireBeans()
 
@@ -288,6 +299,10 @@ type Setting struct {
 	//SubSettingPtr *SubSetting `value:"${sub}"` // 不支持指针
 
 	SubSubSetting SubSubSetting `value:"${sub_sub}"`
+
+	IntSlice    []int    `value:"${int_slice}"`
+	StringSlice []string `value:"${string_slice}"`
+	//FloatSlice  []float64 `value:"${float_slice}"`
 }
 
 func TestDefaultSpringContext_ValueTag(t *testing.T) {
@@ -301,11 +316,26 @@ func TestDefaultSpringContext_ValueTag(t *testing.T) {
 	ctx.SetProperty("bool", true)
 
 	setting := &Setting{}
-	ctx.RegisterBean(setting)
+
+	//ctx.RegisterBean(setting).ConditionOnMatches(func(ctx SpringCore.SpringContext) bool {
+	//	return false
+	//}).Or().ConditionOnProperty("bool")
+
+	//ctx.RegisterBean(setting).ConditionOnMatches(func(ctx SpringCore.SpringContext) bool {
+	//	return true
+	//}).And().ConditionOnProperty("bool")
+
+	ctx.RegisterBean(setting).ConditionOnProperty("bool").And().Group(
+		SpringCore.NewConditional().ConditionOnProperty("int"),
+	)
 
 	ctx.SetProperty("sub.int", int(4))
 	ctx.SetProperty("sub.sub.int", int(5))
 	ctx.SetProperty("sub_sub.int", int(6))
+
+	ctx.SetProperty("int_slice", []int{1, 2})
+	ctx.SetProperty("string_slice", []string{"1", "2"})
+	//ctx.SetProperty("float_slice", []float64{1, 2})
 
 	ctx.AutoWireBeans()
 
@@ -341,7 +371,6 @@ func (f *PrototypeBeanFactory) New(name string) *PrototypeBean {
 
 	// PrototypeBean 依赖的服务可以通过 SpringContext 注入
 	f.Ctx.WireBean(b)
-
 	return b
 }
 
@@ -397,6 +426,8 @@ type Point struct {
 type PointBean struct {
 	Point        Point `value:"${point}"`
 	DefaultPoint Point `value:"${default_point:=(3,4)}"`
+
+	PointList []Point `value:"${point.list}"`
 }
 
 func PointConverter(val string) Point {
@@ -410,44 +441,43 @@ func PointConverter(val string) Point {
 }
 
 func TestDefaultSpringContext_TypeConverter(t *testing.T) {
-	//ctx := SpringCore.NewDefaultSpringContext()
-	//
-	//b := &EnvEnumBean{}
-	//ctx.RegisterBean(b)
-	//
-	//ctx.SetProperties("env.type", "test")
-	//
-	//p := &PointBean{}
-	//ctx.RegisterBean(p)
-	//
-	//if false { // 不是函数
-	//	ctx.RegisterTypeConverter(3)
-	//}
-	//
-	//if false { // 参数太多
-	//	ctx.RegisterTypeConverter(func(_ string, _ string) Point {
-	//		return Point{}
-	//	})
-	//}
-	//
-	//if false { // 返回值太多
-	//	ctx.RegisterTypeConverter(func(_ string) (Point, Point) {
-	//		return Point{}, Point{}
-	//	})
-	//}
-	//
-	//ctx.RegisterTypeConverter(PointConverter)
-	//
-	//ctx.SetProperties("point", "(7,5)")
-	//
-	//ctx.AutoWireBeans()
-	//
-	//if b.EnvType == ENV_TEST {
-	//	fmt.Println("ok")
-	//}
-	//
-	//fmt.Printf("%+v\n", b)
-	//fmt.Printf("%+v\n", p)
+	ctx := SpringCore.NewDefaultSpringContext()
+	ctx.LoadProperties("testdata/config/application.yaml")
+
+	b := &EnvEnumBean{}
+	ctx.RegisterBean(b)
+
+	ctx.SetProperty("env.type", "test")
+
+	p := &PointBean{}
+	ctx.RegisterBean(p)
+
+	if false { // 不是函数
+		ctx.RegisterTypeConverter(3)
+	}
+
+	if false { // 参数太多
+		ctx.RegisterTypeConverter(func(_ string, _ string) Point {
+			return Point{}
+		})
+	}
+
+	if false { // 返回值太多
+		ctx.RegisterTypeConverter(func(_ string) (Point, Point) {
+			return Point{}, Point{}
+		})
+	}
+
+	ctx.RegisterTypeConverter(PointConverter)
+
+	ctx.SetProperty("point", "(7,5)")
+
+	ctx.AutoWireBeans()
+
+	assert.Equal(t, b.EnvType, ENV_TEST)
+
+	fmt.Printf("%+v\n", b)
+	fmt.Printf("%+v\n", p)
 }
 
 type Grouper interface {
@@ -525,8 +555,131 @@ func TestDefaultSpringContext_DiffNameBean(t *testing.T) {
 }
 
 func TestDefaultSpringContext_LoadProperties(t *testing.T) {
+
 	ctx := SpringCore.NewDefaultSpringContext()
+	ctx.LoadProperties("testdata/config/application.yaml")
 	ctx.LoadProperties("testdata/config/application.properties")
-	appName := ctx.GetStringProperty("spring.application.name")
-	fmt.Println("spring.application.name=" + appName)
+
+	val0 := ctx.GetStringProperty("spring.application.name")
+	assert.Equal(t, val0, "test")
+
+	val1 := ctx.GetProperty("yaml.list")
+	assert.Equal(t, val1, []interface{}{1, 2})
+
+	//val2 := ctx.GetStringSliceProperty("properties.list")
+	//assert.Equal(t, val2, []string{"1", "2"})
+
+	val3 := ctx.GetStringSliceProperty("yaml.list")
+	assert.Equal(t, val3, []string{"1", "2"})
+
+	val4 := ctx.GetMapSliceProperty("yaml.obj.list")
+	assert.Equal(t, val4, []map[string]interface{}{
+		{"name": "jim", "age": 12},
+		{"name": "bob", "age": 8},
+	})
+
+	//val5 := ctx.GetMapSliceProperty("properties.obj.list")
+	//assert.Equal(t, val5, []map[string]interface{}{
+	//	{"name": "jerry", "age": 2},
+	//	{"name": "tom", "age": 4},
+	//})
+}
+
+type BeanZero struct {
+	Int int
+}
+
+type BeanOne struct {
+	Zero *BeanZero `autowire:""`
+}
+
+type BeanTwo struct {
+	One *BeanOne `autowire:""`
+}
+
+type BeanThree struct {
+	One *BeanTwo `autowire:""`
+}
+
+func TestDefaultSpringContext_GetBean(t *testing.T) {
+	ctx := SpringCore.NewDefaultSpringContext()
+
+	ctx.RegisterBean(&BeanZero{5})
+	ctx.RegisterBean(new(BeanOne))
+	ctx.RegisterBean(new(BeanTwo))
+
+	var two *BeanTwo
+	ok := ctx.GetBean(&two)
+	assert.Equal(t, ok, true)
+
+	var three *BeanThree
+	ok = ctx.GetBean(&three)
+	assert.Equal(t, ok, false)
+
+	fmt.Printf(SpringUtils.ToJson(two))
+}
+
+func TestDefaultSpringContext_GetBeanByName(t *testing.T) {
+	ctx := SpringCore.NewDefaultSpringContext()
+
+	ctx.RegisterBean(&BeanZero{5})
+	ctx.RegisterBean(new(BeanOne))
+	ctx.RegisterBean(new(BeanTwo))
+
+	var two *BeanTwo
+	ok := ctx.GetBeanByName("", &two)
+	assert.Equal(t, ok, true)
+
+	ok = ctx.GetBeanByName("*SpringCore_test.BeanTwo", &two)
+	assert.Equal(t, ok, true)
+
+	ok = ctx.GetBeanByName("BeanTwo", &two)
+	assert.Equal(t, ok, false)
+
+	ok = ctx.GetBeanByName(":*SpringCore_test.BeanTwo", &two)
+	assert.Equal(t, ok, true)
+
+	ok = ctx.GetBeanByName("github.com/go-spring/go-spring/spring-core_test/SpringCore_test.BeanTwo:*SpringCore_test.BeanTwo", &two)
+	assert.Equal(t, ok, true)
+
+	ok = ctx.GetBeanByName("xxx:*SpringCore_test.BeanTwo", &two)
+	assert.Equal(t, ok, false)
+
+	var three *BeanThree
+	ok = ctx.GetBeanByName("", &three)
+	assert.Equal(t, ok, false)
+
+	fmt.Printf(SpringUtils.ToJson(two))
+}
+
+func TestDefaultSpringContext_FindBeanByName(t *testing.T) {
+	ctx := SpringCore.NewDefaultSpringContext()
+
+	ctx.RegisterBean(&BeanZero{5})
+	ctx.RegisterBean(new(BeanOne))
+	ctx.RegisterBean(new(BeanTwo))
+
+	assert.Panic(t, func() {
+		ctx.FindBeanByName("")
+	}, "找到多个符合条件的值")
+
+	i, ok := ctx.FindBeanByName("*SpringCore_test.BeanTwo")
+	fmt.Println(SpringUtils.ToJson(i))
+	assert.Equal(t, ok, true)
+
+	i, ok = ctx.FindBeanByName("BeanTwo")
+	fmt.Println(SpringUtils.ToJson(i))
+	assert.Equal(t, ok, false)
+
+	i, ok = ctx.FindBeanByName(":*SpringCore_test.BeanTwo")
+	fmt.Println(SpringUtils.ToJson(i))
+	assert.Equal(t, ok, true)
+
+	i, ok = ctx.FindBeanByName("github.com/go-spring/go-spring/spring-core_test/SpringCore_test.BeanTwo:*SpringCore_test.BeanTwo")
+	fmt.Println(SpringUtils.ToJson(i))
+	assert.Equal(t, ok, true)
+
+	i, ok = ctx.FindBeanByName("xxx:*SpringCore_test.BeanTwo")
+	fmt.Println(SpringUtils.ToJson(i))
+	assert.Equal(t, ok, false)
 }

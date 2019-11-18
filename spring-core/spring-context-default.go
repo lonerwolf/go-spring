@@ -22,11 +22,14 @@ import (
 	"strings"
 
 	"github.com/spf13/cast"
-	"github.com/spf13/viper"
+)
+
+var (
+	EMPTY_VALUE = reflect.Value{}
 )
 
 //
-// 定义 Bean 的唯一标识符，类型+名称。
+// BeanKey defines a bean's unique key, type+name.
 //
 type BeanKey struct {
 	Type reflect.Type
@@ -34,40 +37,12 @@ type BeanKey struct {
 }
 
 //
-// 定义 BeanMap 类型
+// BeanCacheItem defines a BeanCache's item.
 //
-type BeanMap map[BeanKey]*BeanDefinition
-
-//
-// 工厂函数
-//
-func NewBeanMap() BeanMap {
-	return make(map[BeanKey]*BeanDefinition)
-}
-
-//
-// 把一个 Bean 存储到 BeanMap 里
-//
-func (m BeanMap) Store(d *BeanDefinition) {
-
-	k := BeanKey{
-		Type: d.Type,
-		Name: d.Name,
-	}
-
-	if _, ok := m[k]; ok {
-		panic("Bean 重复注册")
-	}
-
-	m[k] = d
-}
-
-//
-// 定义 CachedBeanMap 元素的类型
-//
-type CachedBeanMapItem struct {
-	// 已命名 Bean 的列表，实现了相同接口的不同类型有可能具有相同
-	// 的名称，因此名称不能做 Map 的 Key，兼顾性能用 Array 存储.
+type BeanCacheItem struct {
+	// Different typed beans implemented same interface maybe
+	// have same name, so name can't be a map's key. therefor
+	// we use a list to store the cached beans.
 	Named []*BeanDefinition
 
 	// 收集模式得到的 Bean 列表，一个类型只需收集一次。
@@ -75,10 +50,10 @@ type CachedBeanMapItem struct {
 }
 
 //
-// 工厂函数
+// BeanCacheItem's factory method.
 //
-func NewCachedBeanMapItem() *CachedBeanMapItem {
-	return &CachedBeanMapItem{
+func NewBeanCacheItem() *BeanCacheItem {
+	return &BeanCacheItem{
 		Named: make([]*BeanDefinition, 0),
 	}
 }
@@ -86,7 +61,7 @@ func NewCachedBeanMapItem() *CachedBeanMapItem {
 //
 // 将一个 Bean 存储到 CachedBeanMapItem 里
 //
-func (item *CachedBeanMapItem) Store(d *BeanDefinition) {
+func (item *BeanCacheItem) Store(d *BeanDefinition) {
 	if d.Name == "" {
 		panic("请给 Bean 指定一个名称")
 	}
@@ -96,43 +71,21 @@ func (item *CachedBeanMapItem) Store(d *BeanDefinition) {
 //
 // 将收集到的 Bean 列表的值存储到 CachedBeanMapItem 里
 //
-func (item *CachedBeanMapItem) StoreCollect(v reflect.Value) {
+func (item *BeanCacheItem) StoreCollect(v reflect.Value) {
 	item.Collect = v
-}
-
-//
-// 定义 CachedBeanMap 类型
-//
-type CachedBeanMap map[reflect.Type]*CachedBeanMapItem
-
-//
-// 工厂函数
-//
-func NewCachedBeanMap() CachedBeanMap {
-	return make(map[reflect.Type]*CachedBeanMapItem)
-}
-
-//
-// 获取缓存的 CachedBeanMapItem 对象，如果已经存在则返回 true，
-// 否则创建并缓存一个新的 CachedBeanMapItem 对象同时返回 false。
-//
-func (m CachedBeanMap) Get(t reflect.Type) (*CachedBeanMapItem, bool) {
-	c, ok := m[t]
-	if !ok {
-		c = NewCachedBeanMapItem()
-		m[t] = c
-	}
-	return c, ok
 }
 
 //
 // SpringContext 的默认版本
 //
 type DefaultSpringContext struct {
-	Wired         bool                   // 绑定过程已经完成
-	Properties    map[string]interface{} // 所有属性值的集合
-	BeanMap       BeanMap                // 所有 Bean 的集合
-	CachedBeanMap CachedBeanMap          // 根据类型分组 Bean
+	// 属性值列表接口
+	*DefaultProperties
+
+	Frozen        bool                            // 冻结 Bean 注册
+	BeanMap       map[BeanKey]*BeanDefinition     // 所有 Bean 的集合
+	BeanCache     map[reflect.Type]*BeanCacheItem // Bean 的分组缓存
+	TypeConverter map[reflect.Type]interface{}    // 类型转换器的集合
 }
 
 //
@@ -140,95 +93,81 @@ type DefaultSpringContext struct {
 //
 func NewDefaultSpringContext() *DefaultSpringContext {
 	return &DefaultSpringContext{
-		Wired:         false,
-		BeanMap:       NewBeanMap(),
-		CachedBeanMap: NewCachedBeanMap(),
-		Properties:    make(map[string]interface{}),
+		DefaultProperties: NewDefaultProperties(),
+		Frozen:            false,
+		BeanMap:           make(map[BeanKey]*BeanDefinition),
+		BeanCache:         make(map[reflect.Type]*BeanCacheItem),
+		TypeConverter:     make(map[reflect.Type]interface{}),
 	}
 }
 
-//
-// 将 SpringBean 转换为 BeanDefinition 对象
-//
-func ToBeanDefinition(name string, bean SpringBean) *BeanDefinition {
-
-	t := reflect.TypeOf(bean)
-
-	// 检查 Bean 的类型，只能注册指针或者数组类型的 Bean
-	if t.Kind() != reflect.Ptr && t.Kind() != reflect.Slice {
-		panic("bean must be pointer or slice")
+func (ctx *DefaultSpringContext) getBeanCacheItem(t reflect.Type) (*BeanCacheItem, bool) {
+	c, ok := ctx.BeanCache[t]
+	if !ok {
+		c = NewBeanCacheItem()
+		ctx.BeanCache[t] = c
 	}
-
-	v := reflect.ValueOf(bean)
-
-	// 生成默认名称
-	if name == "" {
-		name = t.String()
-	}
-
-	return &BeanDefinition{
-		Init:  Uninitialized,
-		Name:  name,
-		Bean:  bean,
-		Type:  t,
-		Value: v,
-	}
+	return c, ok
 }
 
 //
 // 注册单例 Bean，不指定名称，重复注册会 panic。
 //
-func (ctx *DefaultSpringContext) RegisterBean(bean SpringBean) {
-	ctx.RegisterNameBean("", bean)
+func (ctx *DefaultSpringContext) RegisterBean(bean SpringBean) *Conditional {
+	return ctx.RegisterNameBean("", bean)
 }
 
 //
 // 注册单例 Bean，需指定名称，重复注册会 panic。
 //
-func (ctx *DefaultSpringContext) RegisterNameBean(name string, bean SpringBean) {
+func (ctx *DefaultSpringContext) RegisterNameBean(name string, bean SpringBean) *Conditional {
 	beanDefinition := ToBeanDefinition(name, bean)
-	ctx.RegisterBeanDefinition(beanDefinition)
+	return ctx.RegisterBeanDefinition(beanDefinition)
 }
 
 //
 // 注册单例 Bean，使用 BeanDefinition 对象，重复注册会 panic。
 //
-func (ctx *DefaultSpringContext) RegisterBeanDefinition(d *BeanDefinition) {
-	fmt.Printf("register bean %s:%s\n", TypeName(d.Type), d.Name)
-	item, _ := ctx.CachedBeanMap.Get(d.Type)
-	ctx.BeanMap.Store(d)
-	item.Store(d)
-}
+func (ctx *DefaultSpringContext) RegisterBeanDefinition(d *BeanDefinition) *Conditional {
 
-//
-// 根据类型获取单例 Bean，多于 1 个会 panic，找不到也会 panic。
-//
-func (ctx *DefaultSpringContext) GetBean(i interface{}) {
-	ctx.GetBeanByName("", i)
+	if ctx.Frozen { // 注册已被冻结
+		panic("bean registration frozen")
+	}
+
+	// Store the bean into BeanMap
+	{
+		k := BeanKey{
+			Type: d.Type,
+			Name: d.Name,
+		}
+
+		if _, ok := ctx.BeanMap[k]; ok {
+			panic("Bean 重复注册")
+		}
+
+		ctx.BeanMap[k] = d
+	}
+
+	d.cond = NewConditional()
+	return d.cond
 }
 
 //
 // 根据类型获取单例 Bean，若多于 1 个则 panic；找到返回 true 否则返回 false。
 //
-func (ctx *DefaultSpringContext) FindBean(i interface{}) bool {
-	return ctx.FindBeanByName("", i)
+func (ctx *DefaultSpringContext) GetBean(i interface{}) bool {
+	return ctx.GetBeanByName("?", i)
 }
-
-//
-// 根据名称和类型获取单例 Bean，多于 1 个会 panic，找不到也会 panic。
-//
-func (ctx *DefaultSpringContext) GetBeanByName(beanId string, i interface{}) {
-	if ok := ctx.FindBeanByName(beanId, i); !ok {
-		panic("没有找到符合条件的 Bean")
-	}
-}
-
-var EMPTY_VALUE = reflect.ValueOf(0)
 
 //
 // 根据名称和类型获取单例 Bean，若多于 1 个则 panic；找到返回 true 否则返回 false。
 //
-func (ctx *DefaultSpringContext) FindBeanByName(beanId string, i interface{}) bool {
+func (ctx *DefaultSpringContext) GetBeanByName(beanId string, i interface{}) bool {
+
+	// 确保存在可空标记，抑制 panic 效果。
+	if beanId == "" || beanId[len(beanId)-1] != '?' {
+		beanId += "?"
+	}
 
 	it := reflect.TypeOf(i)
 
@@ -239,40 +178,20 @@ func (ctx *DefaultSpringContext) FindBeanByName(beanId string, i interface{}) bo
 
 	iv := reflect.ValueOf(i)
 
-	typeName, beanName, _ := ParseBeanId(beanId)
-	return ctx.findBeanByName(typeName, beanName, EMPTY_VALUE, iv.Elem(), "")
+	return ctx.findBeanByName(beanId, EMPTY_VALUE, iv.Elem(), "")
 }
 
-//
-// 解析 BeanId 的内容
-//
-func ParseBeanId(beanId string) (typeName string, beanName string, nullable bool) {
-
-	if ss := strings.Split(beanId, ":"); len(ss) > 1 {
-		typeName = ss[0]
-		beanName = ss[1]
-	} else {
-		beanName = ss[0]
-	}
-
-	if strings.HasSuffix(beanName, "?") {
-		beanName = beanName[:len(beanName)-1]
-		nullable = true
-	}
-
-	return
-}
-
-func (ctx *DefaultSpringContext) findBeanByName(typeName string, beanName string, parentValue reflect.Value, fv reflect.Value, fName string) bool {
+func (ctx *DefaultSpringContext) findBeanByName(beanId string, parentValue reflect.Value, fv reflect.Value, fName string) bool {
+	typeName, beanName, nullable := ParseBeanId(beanId)
 
 	t := fv.Type()
 
 	// 检查接收者的类型，接收者必须是指针、数组、接口其中的一种，不能是原始类型。
-	if t.Kind() != reflect.Ptr && t.Kind() != reflect.Slice && t.Kind() != reflect.Interface {
-		panic("receiver \"" + fName + "\" must be pointer or slice or interface")
+	if t.Kind() != reflect.Ptr && t.Kind() != reflect.Slice && t.Kind() != reflect.Interface && t.Kind() != reflect.Map {
+		panic("receiver \"" + fName + "\" must be pointer or slice or interface or map")
 	}
 
-	m, ok := ctx.CachedBeanMap.Get(t)
+	m, ok := ctx.getBeanCacheItem(t)
 
 	found := func(bean *BeanDefinition) bool {
 
@@ -294,7 +213,11 @@ func (ctx *DefaultSpringContext) findBeanByName(typeName string, beanName string
 
 		// 没有找到
 		if count == 0 {
-			return false
+			if nullable {
+				return false
+			} else {
+				panic(fName + " 没有找到符合条件的 Bean")
+			}
 		}
 
 		// 多于 1 个
@@ -302,7 +225,7 @@ func (ctx *DefaultSpringContext) findBeanByName(typeName string, beanName string
 			panic("找到多个符合条件的值")
 		}
 
-		// 对结果进行自动注入
+		// 对依赖项进行依赖注入
 		ctx.WireBeanDefinition(result)
 
 		// 恰好 1 个
@@ -313,7 +236,6 @@ func (ctx *DefaultSpringContext) findBeanByName(typeName string, beanName string
 	// 未命中缓存，则从注册列表里面查询，并更新缓存
 	if !ok {
 
-		// TODO 查询优化 MAP
 		for _, bean := range ctx.BeanMap {
 			if found(bean) {
 				m.Store(bean)
@@ -360,24 +282,14 @@ func (ctx *DefaultSpringContext) CollectBeans(i interface{}) bool {
 	return ctx.collectBeans(ev)
 }
 
-//
-// 收集数组或指针定义的所有符合条件的 Bean 对象，收集不到会 panic。
-//
-func (ctx *DefaultSpringContext) MustCollectBeans(i interface{}) {
-	if ok := ctx.CollectBeans(i); !ok {
-		panic("没有找到符合条件的 Bean")
-	}
-}
-
 func (ctx *DefaultSpringContext) collectBeans(v reflect.Value) bool {
 
 	t := v.Type()
 	et := t.Elem()
 
-	m, ok := ctx.CachedBeanMap.Get(t)
+	m, ok := ctx.getBeanCacheItem(t)
 
-	// 未命中缓存，或者还没有收集到数据，
-	// 则从注册列表里面查询，并更新缓存
+	// 未命中缓存，或者还没有收集到数据，则从注册列表里面查询，并更新缓存
 	if !ok || !m.Collect.IsValid() {
 
 		// 创建一个空数组
@@ -429,8 +341,57 @@ func (ctx *DefaultSpringContext) collectBeans(v reflect.Value) bool {
 	return false
 }
 
+//
+// 根据名称和类型获取单例 Bean，若多于 1 个则 panic；找到返回 true 否则返回 false。
+//
+func (ctx *DefaultSpringContext) FindBeanByName(beanId string) (interface{}, bool) {
+
+	// 确保存在可空标记，抑制 panic 效果。
+	if beanId == "" || beanId[len(beanId)-1] != '?' {
+		beanId += "?"
+	}
+
+	typeName, beanName, nullable := ParseBeanId(beanId)
+
+	var (
+		count  int
+		result *BeanDefinition
+	)
+
+	checkResult := func() (interface{}, bool) {
+
+		// 没有找到
+		if count == 0 {
+			if nullable {
+				return nil, false
+			} else {
+				panic("没有找到符合条件的 Bean")
+			}
+		}
+
+		// 多于 1 个
+		if count > 1 {
+			panic("找到多个符合条件的值")
+		}
+
+		// 恰好 1 个
+		return result.Value.Interface(), true
+	}
+
+	for _, bean := range ctx.BeanMap {
+		if bean.Match(typeName, beanName) {
+			result = bean
+			count++
+		}
+	}
+
+	return checkResult()
+}
+
+//
 // 获取所有的 bean 对象
-func (ctx *DefaultSpringContext) GetAllBeansDefinition() []*BeanDefinition {
+//
+func (ctx *DefaultSpringContext) GetAllBeanDefinitions() []*BeanDefinition {
 	result := make([]*BeanDefinition, 0)
 	for _, v := range ctx.BeanMap {
 		result = append(result, v)
@@ -439,96 +400,29 @@ func (ctx *DefaultSpringContext) GetAllBeansDefinition() []*BeanDefinition {
 }
 
 //
-// 加载属性配置文件
-//
-func (ctx *DefaultSpringContext) LoadProperties(filename string) {
-
-	v := viper.New()
-	v.SetConfigFile(filename)
-	v.ReadInConfig()
-
-	for _, key := range v.AllKeys() {
-		val := v.Get(key)
-		ctx.SetProperty(key, val)
-	}
-}
-
-//
-// 获取属性值，属性名称不支持大小写。
-//
-func (ctx *DefaultSpringContext) GetProperty(name string) interface{} {
-	return ctx.Properties[name]
-}
-
-//
-// 获取布尔型属性值，属性名称不支持大小写。
-//
-func (ctx *DefaultSpringContext) GetBoolProperty(name string) bool {
-	return cast.ToBool(ctx.GetProperty(name))
-}
-
-//
-// 获取有符号整型属性值，属性名称不支持大小写。
-//
-func (ctx *DefaultSpringContext) GetIntProperty(name string) int64 {
-	return cast.ToInt64(ctx.GetProperty(name))
-}
-
-//
-// 获取无符号整型属性值，属性名称不支持大小写。
-//
-func (ctx *DefaultSpringContext) GetUintProperty(name string) uint64 {
-	return cast.ToUint64(ctx.GetProperty(name))
-}
-
-//
-// 获取浮点型属性值，属性名称不支持大小写。
-//
-func (ctx *DefaultSpringContext) GetFloatProperty(name string) float64 {
-	return cast.ToFloat64(ctx.GetProperty(name))
-}
-
-//
-// 获取字符串型属性值，属性名称不支持大小写。
-//
-func (ctx *DefaultSpringContext) GetStringProperty(name string) string {
-	return cast.ToString(ctx.GetProperty(name))
-}
-
-//
-// 设置属性值，属性名称不支持大小写。
-//
-func (ctx *DefaultSpringContext) SetProperty(name string, value interface{}) {
-	ctx.Properties[name] = value
-}
-
-//
-// 获取指定前缀的属性值集合
-//
-func (ctx *DefaultSpringContext) GetPrefixProperties(prefix string) map[string]interface{} {
-	result := make(map[string]interface{})
-	for k, v := range ctx.Properties {
-		if strings.HasPrefix(k, prefix) {
-			result[k] = v
-		}
-	}
-	return result
-}
-
-//
-// 获取属性值，如果没有找到则使用指定的默认值
-//
-func (ctx *DefaultSpringContext) GetDefaultProperty(name string, defaultValue interface{}) (interface{}, bool) {
-	if v, ok := ctx.Properties[name]; ok {
-		return v, true
-	}
-	return defaultValue, false
-}
-
-//
 // 自动绑定所有的 SpringBean
 //
 func (ctx *DefaultSpringContext) AutoWireBeans() {
+
+	// 不再接受 Bean 注册，因为性能的原因使用了缓存，并且在 AutoWireBeans 的过程中
+	// 逐步建立起这个缓存，而随着缓存的建立，绑定的速度会越来越快，从而减少性能的损失。
+
+	ctx.Frozen = true
+
+	for key, beanDefinition := range ctx.BeanMap {
+
+		// 检查是否符合注册条件，不符合的立即删除
+		if !beanDefinition.cond.Matches(ctx) {
+			delete(ctx.BeanMap, key)
+			continue
+		}
+
+		// 将符合注册条件的 Bean 放入到缓存里面
+		fmt.Printf("register bean %s:%s\n", TypeName(beanDefinition.Type), beanDefinition.Name)
+		item, _ := ctx.getBeanCacheItem(beanDefinition.Type)
+		item.Store(beanDefinition)
+	}
+
 	for _, beanDefinition := range ctx.BeanMap {
 		if err := ctx.WireBeanDefinition(beanDefinition); err != nil {
 			panic(err)
@@ -550,7 +444,7 @@ func (ctx *DefaultSpringContext) handleTagAutowire(parentValue reflect.Value, f 
 		return
 	}
 
-	typeName, beanName, nullable := ParseBeanId(beanId)
+	_, beanName, nullable := ParseBeanId(beanId)
 
 	if beanName == "[]" { // 收集模式，autowire:"[]"
 		fvk := fv.Type().Kind()
@@ -566,11 +460,7 @@ func (ctx *DefaultSpringContext) handleTagAutowire(parentValue reflect.Value, f 
 		}
 
 	} else { // 匹配模式，autowire:"" or autowire:"name"
-
-		ok := ctx.findBeanByName(typeName, beanName, parentValue, fv, fName)
-		if !ok && !nullable { // 没找到且不能为空则 panic
-			panic(fName + " 没有找到符合条件的 Bean")
-		}
+		ctx.findBeanByName(beanId, parentValue, fv, fName)
 	}
 }
 
@@ -619,8 +509,30 @@ func (ctx *DefaultSpringContext) handleTagValue(prefix string, f reflect.StructF
 		propValue = ss[1]
 	}
 
+	// 检查是否有默认值
+	checkDefaultProperty := func() {
+		if prop, ok := ctx.GetDefaultProperty(propName, ""); ok {
+			propValue = prop
+		} else {
+			if len(ss) < 2 {
+				panic("properties \"" + propName + "\" not config")
+			}
+		}
+	}
+
 	// 结构体不能指定默认值
 	if fvk == reflect.Struct {
+
+		// 存在类型转换器的情况下优先使用属性值绑定，否则才考虑属性嵌套
+		if fn, ok := ctx.TypeConverter[f.Type]; ok {
+
+			checkDefaultProperty()
+
+			v := reflect.ValueOf(fn)
+			res := v.Call([]reflect.Value{reflect.ValueOf(propValue)})
+			fv.Set(res[0])
+			return
+		}
 
 		if len(ss) > 1 {
 			panic(fName + " 结构体属性不能指定默认值")
@@ -630,13 +542,7 @@ func (ctx *DefaultSpringContext) handleTagValue(prefix string, f reflect.StructF
 		return
 	}
 
-	if prop, ok := ctx.GetDefaultProperty(propName, ""); ok {
-		propValue = prop
-	} else {
-		if len(ss) < 2 {
-			panic("property \"" + propName + "\" not config")
-		}
-	}
+	checkDefaultProperty()
 
 	switch fv.Kind() {
 	case reflect.Uint64, reflect.Uint32, reflect.Uint16, reflect.Uint8, reflect.Uint:
@@ -653,6 +559,36 @@ func (ctx *DefaultSpringContext) handleTagValue(prefix string, f reflect.StructF
 	case reflect.Bool:
 		b := cast.ToBool(propValue)
 		fv.SetBool(b)
+	case reflect.Slice:
+		{
+			elemType := fv.Type().Elem()
+			elemKind := elemType.Kind()
+
+			switch elemKind {
+			case reflect.Int:
+				i := cast.ToIntSlice(propValue)
+				fv.Set(reflect.ValueOf(i))
+			case reflect.String:
+				i := cast.ToStringSlice(propValue)
+				fv.Set(reflect.ValueOf(i))
+			default:
+				if fn, ok := ctx.TypeConverter[elemType]; ok {
+
+					v := reflect.ValueOf(fn)
+					s0 := cast.ToStringSlice(propValue)
+					sv := reflect.MakeSlice(f.Type, len(s0), len(s0))
+
+					for i, iv := range s0 {
+						res := v.Call([]reflect.Value{reflect.ValueOf(iv)})
+						sv.Index(i).Set(res[0])
+					}
+
+					fv.Set(sv)
+				} else {
+					panic(fName + " unsupported type " + elemKind.String())
+				}
+			}
+		}
 	default:
 		panic(fName + " unsupported type " + fvk.String())
 	}
@@ -706,4 +642,22 @@ func (ctx *DefaultSpringContext) WireBeanDefinition(beanDefinition *BeanDefiniti
 
 	beanDefinition.Init = Initialized
 	return nil
+}
+
+//
+// 注册类型转换器，用于属性绑定，函数原型 func(string)struct
+//
+func (ctx *DefaultSpringContext) RegisterTypeConverter(fn interface{}) {
+
+	t := reflect.TypeOf(fn)
+
+	if t.Kind() != reflect.Func || t.NumIn() != 1 || t.NumOut() != 1 {
+		panic("fn must be func(string)struct")
+	}
+
+	if t.In(0).Kind() != reflect.String || t.Out(0).Kind() != reflect.Struct {
+		panic("fn must be func(string)struct")
+	}
+
+	ctx.TypeConverter[t.Out(0)] = fn
 }
